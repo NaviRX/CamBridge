@@ -1,0 +1,20 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <UseWindowsForms>true</UseWindowsForms>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <PlatformTarget>x64</PlatformTarget>
+    <AssemblyName>CamBridge</AssemblyName>
+    <RootNamespace>CamBridge</RootNamespace>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+    <ApplicationIcon>Assets\CamBridge.ico</ApplicationIcon>
+    <NuGetAudit>false</NuGetAudit>
+    <DefaultItemExcludes>$(DefaultItemExcludes);obj-clean\**</DefaultItemExcludes>
+  </PropertyGroup>
+  <ItemGroup>
+    <Content Include="Assets\CamBridge.ico" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+</Project>
