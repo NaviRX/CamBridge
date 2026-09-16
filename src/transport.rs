@@ -184,6 +184,17 @@ pub fn parse_fragment(packet: &[u8]) -> Result<(Fragment<'_>, Option<FrameHeader
     let index = u32::from_le_bytes(packet[16..20].try_into().unwrap());
     let count = u32::from_le_bytes(packet[20..24].try_into().unwrap());
     let expected_frame_bytes = u32::from_le_bytes(packet[24..28].try_into().unwrap());
+    if packet.len() > UDP_PAYLOAD
+        || count == 0
+        || index >= count
+        || has_header != (index == 0)
+        || expected_frame_bytes as usize > crate::protocol::MAX_FRAME_BYTES
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "invalid fragment bounds",
+        ));
+    }
     let mut offset = 28;
     let header = if has_header {
         if packet.len() < offset + HEADER_LEN {
@@ -194,6 +205,12 @@ pub fn parse_fragment(packet: &[u8]) -> Result<(Fragment<'_>, Option<FrameHeader
         }
         let value = FrameHeader::decode(&packet[offset..offset + HEADER_LEN])
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, format!("{e:?}")))?;
+        if value.frame_id != frame_id || value.payload_len != expected_frame_bytes {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "inconsistent frame header",
+            ));
+        }
         offset += HEADER_LEN;
         Some(value)
     } else {
@@ -256,5 +273,58 @@ mod tests {
         let (first, decoded) = parse_fragment(&packets[0]).unwrap();
         assert_eq!(first.frame_id, 55);
         assert_eq!(decoded, Some(header));
+    }
+    #[test]
+    fn reassembles_real_4k_xrgb_frame_in_reverse_order() {
+        let payload = vec![42; 3840 * 2160 * 4];
+        let header = FrameHeader {
+            codec: TransportCodec::Xrgb8888,
+            flags: FLAG_KEYFRAME,
+            width: 3840,
+            height: 2160,
+            fps_numerator: 60,
+            fps_denominator: 1,
+            frame_id: 7,
+            timestamp_100ns: 123,
+            payload_len: payload.len() as u32,
+        };
+        let packets = fragments(&header, &payload).unwrap();
+        let mut assembler = crate::reassembly::Reassembler::default();
+        let now = Instant::now();
+        let mut result = None;
+        for packet in packets.iter().rev() {
+            let (f, _) = parse_fragment(packet).unwrap();
+            if let Some(bytes) = assembler
+                .push(
+                    f.frame_id,
+                    f.index,
+                    f.count,
+                    f.expected_frame_bytes as usize,
+                    f.data,
+                    now,
+                )
+                .unwrap()
+            {
+                result = Some(bytes);
+            }
+        }
+        assert_eq!(result.as_deref(), Some(payload.as_slice()));
+    }
+    #[test]
+    fn rejects_inconsistent_fragment_identity() {
+        let header = FrameHeader {
+            codec: TransportCodec::Jpeg,
+            flags: FLAG_KEYFRAME,
+            width: 640,
+            height: 480,
+            fps_numerator: 30,
+            fps_denominator: 1,
+            frame_id: 5,
+            timestamp_100ns: 0,
+            payload_len: 10,
+        };
+        let mut packets = fragments(&header, &[0; 10]).unwrap();
+        packets[0][8] = 9;
+        assert!(parse_fragment(&packets[0]).is_err());
     }
 }

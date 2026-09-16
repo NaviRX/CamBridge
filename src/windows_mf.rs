@@ -22,12 +22,12 @@ use crate::capability::{
     CaptureDevice, CaptureMode, DeviceKind, FrameRate, PixelFormat, classify_device, exact_modes,
 };
 
-struct MfLifetime {
+pub(crate) struct MfLifetime {
     com_initialized: bool,
 }
 
 impl MfLifetime {
-    fn start() -> Result<Self, String> {
+    pub(crate) fn start() -> Result<Self, String> {
         let result = unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) };
         let com_initialized = if result.is_ok() {
             true
@@ -191,4 +191,239 @@ pub fn enumerate_video_devices() -> Result<Vec<CaptureDevice>, String> {
 
 pub fn conservative_kind(name: &str, symbolic_link: &str) -> DeviceKind {
     classify_device(name, symbolic_link)
+}
+
+/// A reader lives entirely on its capture thread; native MJPEG samples are
+/// retained unchanged for transport. Other modes request MF's RGB converter.
+type CaptureResult = Result<Option<(Vec<u8>, i64, bool)>, String>;
+pub struct CaptureSession {
+    reader: windows::Win32::Media::MediaFoundation::IMFSourceReader,
+    source: IMFMediaSource,
+    pub native_jpeg: bool,
+    pub native_codec: Option<crate::capability::TransportCodec>,
+    pub config: Vec<u8>,
+    pub width: u32,
+    pub height: u32,
+    stride: i32,
+    events: std::sync::mpsc::Receiver<CaptureResult>,
+    _lifetime: MfLifetime,
+}
+
+impl CaptureSession {
+    pub fn open(
+        link: &str,
+        mode: &CaptureMode,
+        transport: crate::capability::TransportCodec,
+    ) -> Result<Self, String> {
+        use windows::Win32::Media::MediaFoundation::*;
+        let lifetime = MfLifetime::start()?;
+        unsafe {
+            let mut attrs = None;
+            MFCreateAttributes(&mut attrs, 3).map_err(|e| e.to_string())?;
+            let attrs = attrs.unwrap();
+            attrs
+                .SetGUID(
+                    &MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE,
+                    &MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE_VIDCAP_GUID,
+                )
+                .map_err(|e| e.to_string())?;
+            let link: Vec<u16> = link.encode_utf16().chain(Some(0)).collect();
+            attrs
+                .SetString(
+                    &MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE_VIDCAP_SYMBOLIC_LINK,
+                    windows::core::PCWSTR(link.as_ptr()),
+                )
+                .map_err(|e| e.to_string())?;
+            let source = MFCreateDeviceSource(&attrs).map_err(|e| e.to_string())?;
+            let mut options = None;
+            MFCreateAttributes(&mut options, 1).map_err(|e| e.to_string())?;
+            let options = options.unwrap();
+            let (tx, events) = std::sync::mpsc::sync_channel(2);
+            let callback: IMFSourceReaderCallback = ReaderCallback { tx }.into();
+            options
+                .SetUnknown(&MF_SOURCE_READER_ASYNC_CALLBACK, &callback)
+                .map_err(|e| e.to_string())?;
+            options
+                .SetUINT32(&MF_SOURCE_READER_ENABLE_VIDEO_PROCESSING, 1)
+                .map_err(|e| e.to_string())?;
+            let reader = match MFCreateSourceReaderFromMediaSource(&source, &options) {
+                Ok(r) => r,
+                Err(e) => {
+                    let _ = source.Shutdown();
+                    return Err(e.to_string());
+                }
+            };
+            let configure = || -> windows::core::Result<(bool, i32, Option<crate::capability::TransportCodec>,Vec<u8>)> {
+                let stream = MF_SOURCE_READER_FIRST_VIDEO_STREAM.0 as u32;
+                let native = reader.GetNativeMediaType(stream, mode.native_type_index)?;
+                let (w, h) = unpack_pair(native.GetUINT64(&MF_MT_FRAME_SIZE)?);
+                let (n, d) = unpack_pair(native.GetUINT64(&MF_MT_FRAME_RATE)?);
+                if (w, h, n, d, pixel_format(native.GetGUID(&MF_MT_SUBTYPE)?))
+                    != (
+                        mode.width,
+                        mode.height,
+                        mode.fps.numerator,
+                        mode.fps.denominator,
+                        mode.format,
+                    )
+                {
+                    return Err(windows::core::Error::from_hresult(
+                        windows::Win32::Foundation::E_INVALIDARG,
+                    ));
+                }
+                reader.SetCurrentMediaType(stream, None, &native)?;
+                let jpeg = mode.format == PixelFormat::Mjpeg;
+                let native_codec = crate::capability::TransportCodec::from_input(mode.format).filter(|c|mode.format.compressed()&&(*c==transport||jpeg));
+                if native_codec.is_none() {
+                    let output = MFCreateMediaType()?;
+                    output.SetGUID(&MF_MT_MAJOR_TYPE, &MFMediaType_Video)?;
+                    output.SetGUID(&MF_MT_SUBTYPE, &MFVideoFormat_RGB32)?;
+                    reader.SetCurrentMediaType(stream, None, &output)?;
+                }
+                let current = reader.GetCurrentMediaType(stream)?;
+                let stride = current
+                    .GetUINT32(&MF_MT_DEFAULT_STRIDE)
+                    .unwrap_or(mode.width * 4) as i32;
+                let mut config=Vec::new();
+                if let Ok(length)=current.GetBlobSize(&MF_MT_MPEG_SEQUENCE_HEADER)&& length<=65536{config.resize(length as usize,0);current.GetBlob(&MF_MT_MPEG_SEQUENCE_HEADER,&mut config,None)?;}
+                Ok((jpeg, stride,native_codec,config))
+            };
+            match configure() {
+                Ok((native_jpeg, stride, native_codec, config)) => Ok(Self {
+                    reader,
+                    source,
+                    native_jpeg,
+                    native_codec,
+                    config,
+                    width: mode.width,
+                    height: mode.height,
+                    stride,
+                    events,
+                    _lifetime: lifetime,
+                }),
+                Err(e) => {
+                    let _ = source.Shutdown();
+                    Err(format!("입력 모드를 열 수 없습니다: {e}"))
+                }
+            }
+        }
+    }
+
+    pub fn read(&self) -> Result<Option<(Vec<u8>, i64, bool)>, String> {
+        use windows::Win32::Media::MediaFoundation::*;
+        unsafe {
+            self.reader
+                .ReadSample(
+                    MF_SOURCE_READER_FIRST_VIDEO_STREAM.0 as u32,
+                    0,
+                    None,
+                    None,
+                    None,
+                    None,
+                )
+                .map_err(|e| e.to_string())?;
+            let Some((data, timestamp, keyframe)) = self
+                .events
+                .recv_timeout(std::time::Duration::from_secs(3))
+                .map_err(|_| "입력 신호 응답 없음 (3초)".to_string())??
+            else {
+                return Ok(None);
+            };
+            let keyframe = keyframe || self.native_jpeg;
+            let result = if self.native_codec.is_some() {
+                Ok(data.to_vec())
+            } else {
+                let pitch = self.stride.unsigned_abs() as usize;
+                let row = self.width as usize * 4;
+                if pitch < row || data.len() < pitch * self.height as usize {
+                    Err("잘린 RGB 프레임".into())
+                } else {
+                    let mut pixels = vec![0; row * self.height as usize];
+                    for y in 0..self.height as usize {
+                        let sy = if self.stride < 0 {
+                            self.height as usize - 1 - y
+                        } else {
+                            y
+                        };
+                        pixels[y * row..(y + 1) * row]
+                            .copy_from_slice(&data[sy * pitch..sy * pitch + row]);
+                    }
+                    Ok(pixels)
+                }
+            };
+            result.map(|bytes| Some((bytes, timestamp, keyframe)))
+        }
+    }
+}
+
+use windows::Win32::Media::MediaFoundation::{
+    IMFMediaEvent, IMFSample, IMFSourceReaderCallback, IMFSourceReaderCallback_Impl,
+};
+#[windows::core::implement(IMFSourceReaderCallback)]
+struct ReaderCallback {
+    tx: std::sync::mpsc::SyncSender<CaptureResult>,
+}
+impl IMFSourceReaderCallback_Impl for ReaderCallback_Impl {
+    fn OnReadSample(
+        &self,
+        status: windows::core::HRESULT,
+        _stream: u32,
+        flags: u32,
+        timestamp: i64,
+        sample: windows::core::Ref<IMFSample>,
+    ) -> windows::core::Result<()> {
+        use windows::Win32::Media::MediaFoundation::*;
+        let result = (|| -> Result<Option<(Vec<u8>, i64, bool)>, String> {
+            status.ok().map_err(|e| e.to_string())?;
+            if flags
+                & (MF_SOURCE_READERF_ERROR.0
+                    | MF_SOURCE_READERF_ENDOFSTREAM.0
+                    | MF_SOURCE_READERF_CURRENTMEDIATYPECHANGED.0) as u32
+                != 0
+            {
+                return Err(format!("장치 종료 또는 입력 형식 변경 ({flags:#x})"));
+            }
+            let Some(sample) = sample.as_ref() else {
+                return Ok(None);
+            };
+            unsafe {
+                let buffer = sample
+                    .ConvertToContiguousBuffer()
+                    .map_err(|e| e.to_string())?;
+                let mut p = std::ptr::null_mut();
+                let mut length = 0;
+                buffer
+                    .Lock(&mut p, None, Some(&mut length))
+                    .map_err(|e| e.to_string())?;
+                if length as usize > crate::protocol::MAX_FRAME_BYTES {
+                    let _ = buffer.Unlock();
+                    return Err("캡처 프레임 크기 제한 초과".into());
+                }
+                let bytes = std::slice::from_raw_parts(p, length as usize).to_vec();
+                let _ = buffer.Unlock();
+                let key = sample.GetUINT32(&MFSampleExtension_CleanPoint).unwrap_or(0) != 0;
+                Ok(Some((bytes, timestamp, key)))
+            }
+        })();
+        let _ = self.tx.try_send(result);
+        Ok(())
+    }
+    fn OnFlush(&self, _stream: u32) -> windows::core::Result<()> {
+        Ok(())
+    }
+    fn OnEvent(
+        &self,
+        _stream: u32,
+        _event: windows::core::Ref<IMFMediaEvent>,
+    ) -> windows::core::Result<()> {
+        Ok(())
+    }
+}
+
+impl Drop for CaptureSession {
+    fn drop(&mut self) {
+        unsafe {
+            let _ = self.source.Shutdown();
+        }
+    }
 }

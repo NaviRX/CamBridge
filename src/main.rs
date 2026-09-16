@@ -1,3 +1,4 @@
+#![cfg_attr(target_os = "windows", windows_subsystem = "windows")]
 use cambridge::{
     capability::{FrameRate, xrgb_bandwidth_bps},
     protocol::VERSION,
@@ -6,7 +7,17 @@ use cambridge::{
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     match args.get(1).map(String::as_str) {
+        None | Some("--tray") => {
+            if let Err(error) = cambridge::desktop::run() {
+                eprintln!("{error}");
+            }
+        }
         Some("--protocol-version") => println!("{VERSION}"),
+        Some("--probe-codecs") => {
+            for choice in cambridge::mft::probe_encoders(640, 480, FrameRate::new(30, 1)) {
+                println!("{choice:?}");
+            }
+        }
         Some("--xrgb-bandwidth") if args.len() == 5 => {
             let w: u32 = args[2].parse().expect("width");
             let h: u32 = args[3].parse().expect("height");

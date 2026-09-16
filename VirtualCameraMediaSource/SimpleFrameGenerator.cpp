@@ -6,7 +6,8 @@
 namespace
 {
     constexpr wchar_t PipeName[] = L"\\\\.\\pipe\\CamBridge.Video.v1";
-    constexpr DWORD FrameBytes = 1920 * 1080 * 4;
+    constexpr wchar_t PipeNameV2[] = L"\\\\.\\pipe\\CamBridge.Video.v2";
+    constexpr DWORD MaxFrameBytes = 128 * 1024 * 1024;
 
     bool ReadExact(HANDLE pipe, BYTE* data, DWORD length)
     {
@@ -36,17 +37,24 @@ void SimpleFrameGenerator::ReceiveFrames()
 {
     while (m_running)
     {
-        if (!WaitNamedPipeW(PipeName, 250)) continue;
-        HANDLE pipe = CreateFileW(PipeName, GENERIC_READ, 0, nullptr, OPEN_EXISTING, 0, nullptr);
+        const bool v2 = WaitNamedPipeW(PipeNameV2, 100) != FALSE;
+        if (!v2 && !WaitNamedPipeW(PipeName, 250)) continue;
+        HANDLE pipe = CreateFileW(v2 ? PipeNameV2 : PipeName, GENERIC_READ, 0, nullptr, OPEN_EXISTING, 0, nullptr);
         if (pipe == INVALID_HANDLE_VALUE) continue;
         while (m_running)
         {
             DWORD length = 0;
-            if (!ReadExact(pipe, reinterpret_cast<BYTE*>(&length), sizeof(length)) || length != FrameBytes) break;
+            DWORD width = 1920, height = 1080;
+            if (v2 && (!ReadExact(pipe, reinterpret_cast<BYTE*>(&width), 4) || !ReadExact(pipe, reinterpret_cast<BYTE*>(&height), 4))) break;
+            if (!ReadExact(pipe, reinterpret_cast<BYTE*>(&length), sizeof(length))) break;
+            if (width == 0 || height == 0 || width > 8192 || height > 8192 || length > MaxFrameBytes ||
+                static_cast<ULONGLONG>(width) * height * 4 != length) break;
             std::vector<BYTE> next(length);
             if (!ReadExact(pipe, next.data(), length)) break;
             std::lock_guard<std::mutex> lock(m_frameLock);
             m_latestFrame.swap(next);
+            m_inputWidth = width;
+            m_inputHeight = height;
             m_latestFrameAt = GetTickCount64();
         }
         CloseHandle(pipe);
@@ -86,15 +94,31 @@ HRESULT SimpleFrameGenerator::CreateFrame(
     _In_ ULONG rgbMask)
 {
     std::vector<BYTE> frame;
+    UINT32 inputWidth = 0, inputHeight = 0;
     {
         std::lock_guard<std::mutex> lock(m_frameLock);
-        if (GetTickCount64() - m_latestFrameAt < 2000)
+        if (GetTickCount64() - m_latestFrameAt < 2000) {
             frame = m_latestFrame;
+            inputWidth = m_inputWidth;
+            inputHeight = m_inputHeight;
+        }
     }
-    if (frame.size() != FrameBytes)
+    if (frame.empty() || frame.size() != static_cast<size_t>(inputWidth) * inputHeight * 4)
     {
         ZeroMemory(pBuf, len);
         return S_OK;
+    }
+    if (inputWidth != m_width || inputHeight != m_height) {
+        std::vector<BYTE> resized(static_cast<size_t>(m_width) * m_height * 4);
+        for (UINT32 y = 0; y < m_height; ++y) {
+            const UINT32 sy = static_cast<UINT32>(static_cast<UINT64>(y) * inputHeight / m_height);
+            for (UINT32 x = 0; x < m_width; ++x) {
+                const UINT32 sx = static_cast<UINT32>(static_cast<UINT64>(x) * inputWidth / m_width);
+                memcpy(resized.data() + (static_cast<size_t>(y) * m_width + x) * 4,
+                    frame.data() + (static_cast<size_t>(sy) * inputWidth + sx) * 4, 4);
+            }
+        }
+        frame.swap(resized);
     }
 
     if (m_subType == MFVideoFormat_RGB32)
@@ -107,7 +131,7 @@ HRESULT SimpleFrameGenerator::CreateFrame(
     {
         DEBUG_MSG(L"NV12 frames %s \n", winrt::to_hstring(MFVideoFormat_NV12).data());
 
-        RETURN_IF_FAILED(RGB32ToNV12Frame(frame.data(), FrameBytes, m_width * 4, m_width, m_height, pBuf, len, pitch));
+        RETURN_IF_FAILED(RGB32ToNV12Frame(frame.data(), static_cast<ULONG>(frame.size()), m_width * 4, m_width, m_height, pBuf, len, pitch));
     }
     else
     {

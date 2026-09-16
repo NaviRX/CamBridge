@@ -32,7 +32,13 @@ pub enum ProtocolError {
 
 impl FrameHeader {
     pub fn encode(&self) -> Result<[u8; HEADER_LEN], ProtocolError> {
-        if self.width == 0 || self.height == 0 || self.fps_denominator == 0 {
+        if self.width == 0
+            || self.height == 0
+            || self.width > 8192
+            || self.height > 8192
+            || self.fps_numerator == 0
+            || self.fps_denominator == 0
+        {
             return Err(ProtocolError::InvalidDimensions);
         }
         if self.payload_len as usize > MAX_FRAME_BYTES {
@@ -77,7 +83,13 @@ impl FrameHeader {
             timestamp_100ns: i64::from_le_bytes(bytes[36..44].try_into().unwrap()),
             payload_len: u32::from_le_bytes(bytes[44..48].try_into().unwrap()),
         };
-        if value.width == 0 || value.height == 0 || value.fps_denominator == 0 {
+        if value.width == 0
+            || value.height == 0
+            || value.width > 8192
+            || value.height > 8192
+            || value.fps_numerator == 0
+            || value.fps_denominator == 0
+        {
             return Err(ProtocolError::InvalidDimensions);
         }
         if value.payload_len as usize > MAX_FRAME_BYTES {

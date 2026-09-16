@@ -48,7 +48,7 @@ impl Reassembler {
             return Err(ReassemblyError::FrameTooLarge);
         }
         if chunk_count == 0
-            || chunk_count as usize > (MAX_FRAME_BYTES / UDP_PAYLOAD) + 1
+            || chunk_count as usize > MAX_FRAME_BYTES.div_ceil(UDP_PAYLOAD - 28) + 1
             || chunk_index >= chunk_count
         {
             return Err(ReassemblyError::TooManyChunks);
@@ -77,7 +77,7 @@ impl Reassembler {
         }
         if frame.chunks[chunk_index as usize].is_none() {
             frame.bytes = frame.bytes.saturating_add(data.len());
-            if frame.bytes > MAX_FRAME_BYTES {
+            if frame.bytes > frame.expected || data.len() > UDP_PAYLOAD {
                 self.frames.remove(&frame_id);
                 return Err(ReassemblyError::FrameTooLarge);
             }

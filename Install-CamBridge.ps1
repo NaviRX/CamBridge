@@ -26,6 +26,10 @@ if (Get-Process CamBridge -ErrorAction SilentlyContinue) {
 }
 New-Item -ItemType Directory -Path $folder -Force | Out-Null
 Copy-Item -LiteralPath $app -Destination (Join-Path $folder 'CamBridge.exe') -Force
+foreach ($name in @('CamBridge.ico', 'libunwind.dll', 'README.md', 'LICENSE.microsoft', 'LLVM-LICENSE.txt')) {
+    $optional = Join-Path $PSScriptRoot $name
+    if (Test-Path -LiteralPath $optional) { Copy-Item -LiteralPath $optional -Destination (Join-Path $folder $name) -Force }
+}
 if (-not (Test-Path -LiteralPath $nativeTarget)) {
     Copy-Item -LiteralPath $source -Destination $nativeTarget
 }
@@ -42,4 +46,5 @@ if (-not (Get-NetFirewallRule -DisplayName 'CamBridge UDP discovery' -ErrorActio
         -Protocol UDP -LocalPort 45832 -RemoteAddress LocalSubnet -Profile Private | Out-Null
 }
 Write-Host "CamBridge installed to $folder"
-Write-Host 'Run CamBridge.exe. On the game PC choose Receive and enter the sender PC IP.'
+Write-Host 'Run CamBridge.exe on both PCs. On the game PC click Receive. On the capture PC enter the receiver PC IP and click Send.'
+Write-Host 'Enable Virtual camera / OBS mode on the receiver, then select CamBridge in OBS.'

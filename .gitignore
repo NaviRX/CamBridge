@@ -8,3 +8,8 @@
 *.pdb
 *.ilk
 *.user
+/packages/
+/native-build/
+/package/
+/CamBridge-Rust-win64.zip
+/CamBridge-install-error.txt
