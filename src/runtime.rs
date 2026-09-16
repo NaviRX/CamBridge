@@ -271,7 +271,12 @@ fn sender(settings: SenderSettings, state: Shared, stop: Arc<AtomicBool>) {
             let mut ack = [0u8; 1024];
             while let Ok((n, peer)) = socket.recv_from(&mut ack) {
                 if peer == settings.target {
-                    if n==4&&&ack[..4]==b"CBK2"{if let Some(e)=&encoder{e.force_keyframe();}continue;}
+                    if n == 4 && &ack[..4] == b"CBK2" {
+                        if let Some(e) = &encoder {
+                            e.force_keyframe();
+                        }
+                        continue;
+                    }
                     match ReceiverHello::decode(&ack[..n]) {
                         Ok(h) if h.codecs.contains(&settings.codec) => seen = Some(now),
                         Ok(_) => status(&state, "수신자가 선택한 전송 코덱을 지원하지 않습니다"),
@@ -647,7 +652,8 @@ fn receive_socket(state: Shared, stop: Arc<AtomicBool>, socket: UdpSocket, probe
                     assembler = Reassembler::default();
                     headers.clear();
                     latest_id = None;
-                    decoder=None;waiting_keyframe=true;
+                    decoder = None;
+                    waiting_keyframe = true;
                 }
                 peer = Some(from);
                 let _ = socket.send_to(&hello, from);
@@ -710,7 +716,7 @@ fn receive_socket(state: Shared, stop: Arc<AtomicBool>, socket: UdpSocket, probe
                         decoder = None;
                     }
                     if waiting_keyframe && !h.keyframe() {
-                        let _=socket.send_to(b"CBK2",from);
+                        let _ = socket.send_to(b"CBK2", from);
                         continue;
                     }
                     if decoder.is_none() {

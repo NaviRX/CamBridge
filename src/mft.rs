@@ -293,8 +293,12 @@ impl Transform {
                     None
                 } else {
                     let s = MFCreateSample().map_err(|e| e.to_string())?;
-                    let b = MFCreateMemoryBuffer(if info.cbSize>0{info.cbSize}else{self.width*self.height*4})
-                        .map_err(|e| e.to_string())?;
+                    let b = MFCreateMemoryBuffer(if info.cbSize > 0 {
+                        info.cbSize
+                    } else {
+                        self.width * self.height * 4
+                    })
+                    .map_err(|e| e.to_string())?;
                     s.AddBuffer(&b).map_err(|e| e.to_string())?;
                     Some(s)
                 };
@@ -346,10 +350,18 @@ impl Transform {
                         .map_err(|e| e.to_string())?;
                     let mut bytes = std::slice::from_raw_parts(p, len as usize).to_vec();
                     buffer.Unlock().map_err(|e| e.to_string())?;
-                    if !self.encode&&let Ok(surface)=buffer.cast::<IMF2DBuffer>(){
-                        let size=surface.GetContiguousLength().map_err(|e|e.to_string())? as usize;
-                        if size>crate::protocol::MAX_FRAME_BYTES{return Err("디코더 프레임 크기 초과".into());}
-                        bytes.resize(size,0);surface.ContiguousCopyTo(&mut bytes).map_err(|e|e.to_string())?;
+                    if !self.encode
+                        && let Ok(surface) = buffer.cast::<IMF2DBuffer>()
+                    {
+                        let size =
+                            surface.GetContiguousLength().map_err(|e| e.to_string())? as usize;
+                        if size > crate::protocol::MAX_FRAME_BYTES {
+                            return Err("디코더 프레임 크기 초과".into());
+                        }
+                        bytes.resize(size, 0);
+                        surface
+                            .ContiguousCopyTo(&mut bytes)
+                            .map_err(|e| e.to_string())?;
                     }
                     let mut config = Vec::new();
                     if self.encode

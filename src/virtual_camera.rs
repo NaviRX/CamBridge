@@ -20,6 +20,7 @@ use windows::{
 pub struct VirtualCamera {
     camera: IMFVirtualCamera,
     stop: Arc<AtomicBool>,
+    workers: Vec<thread::JoinHandle<()>>,
 }
 impl VirtualCamera {
     pub fn start(state: Shared) -> Result<Self, String> {
@@ -47,15 +48,24 @@ impl VirtualCamera {
             let worker_stop = stop.clone();
             let state_v2 = state.clone();
             let stop_v2 = stop.clone();
-            thread::spawn(move || pipe_worker(state_v2, stop_v2, true));
-            thread::spawn(move || pipe_worker(state, worker_stop, false));
-            Ok(Self { camera, stop })
+            let workers = vec![
+                thread::spawn(move || pipe_worker(state_v2, stop_v2, true)),
+                thread::spawn(move || pipe_worker(state, worker_stop, false)),
+            ];
+            Ok(Self {
+                camera,
+                stop,
+                workers,
+            })
         }
     }
 }
 impl Drop for VirtualCamera {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::Relaxed);
+        for worker in self.workers.drain(..) {
+            let _ = worker.join();
+        }
         unsafe {
             let _ = self.camera.Stop();
             let _ = self.camera.Shutdown();

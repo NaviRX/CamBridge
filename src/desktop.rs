@@ -232,7 +232,10 @@ impl App {
         } else {
             self.running = Some(runtime::start_receiver(self.state.clone()));
         }
-        for id in [SEND, RECEIVE, REFRESH, DEVICE, MODE, CODEC, TARGET, QUALITY] {
+        for id in [
+            SEND, RECEIVE, REFRESH, DEVICE, MODE, CODEC, TARGET, QUALITY, SCALE, FPS, BITRATE,
+            PROBE,
+        ] {
             let _ = EnableWindow(self.control(id), false);
         }
     }
@@ -278,7 +281,10 @@ impl App {
             .is_some_and(|r| r.done.load(Ordering::Relaxed))
         {
             self.running = None;
-            for id in [SEND, RECEIVE, REFRESH, DEVICE, MODE, CODEC, TARGET, QUALITY] {
+            for id in [
+                SEND, RECEIVE, REFRESH, DEVICE, MODE, CODEC, TARGET, QUALITY, SCALE, FPS, BITRATE,
+                PROBE,
+            ] {
                 let _ = EnableWindow(self.control(id), true);
             }
         }
@@ -550,7 +556,23 @@ unsafe extern "system" fn procedure(
                         let mut pt = POINT::default();
                         let _ = GetCursorPos(&mut pt);
                         let _ = SetForegroundWindow(hwnd);
-                        let _ = TrackPopupMenu(menu, TPM_RIGHTBUTTON, pt.x, pt.y, None, hwnd, None);
+                        let selected = TrackPopupMenu(
+                            menu,
+                            TPM_RIGHTBUTTON | TPM_RETURNCMD,
+                            pt.x,
+                            pt.y,
+                            None,
+                            hwnd,
+                            None,
+                        );
+                        if selected.0 > 0 {
+                            let _ = PostMessageW(
+                                Some(hwnd),
+                                WM_COMMAND,
+                                WPARAM(selected.0 as usize),
+                                LPARAM(0),
+                            );
+                        }
                         let _ = DestroyMenu(menu);
                     }
                 }
