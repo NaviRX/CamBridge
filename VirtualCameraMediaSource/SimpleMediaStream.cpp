@@ -29,7 +29,7 @@ namespace winrt::WindowsSample::implementation
         m_dwStreamId = dwStreamId;
         m_allocatorUsage = allocatorUsage;
 
-        const uint32_t NUM_MEDIATYPES = 2;
+        const uint32_t NUM_MEDIATYPES = 12;
         wil::unique_cotaskmem_array_ptr<wil::com_ptr_nothrow<IMFMediaType>> mediaTypeList = wilEx::make_unique_cotaskmem_array<wil::com_ptr_nothrow<IMFMediaType>>(NUM_MEDIATYPES);
 
         // Initialize media type and set the video output media type.
@@ -59,6 +59,24 @@ namespace winrt::WindowsSample::implementation
         spMediaType->SetUINT32(MF_MT_AVG_BITRATE, bitrate);
         MFSetAttributeRatio(spMediaType.get(), MF_MT_PIXEL_ASPECT_RATIO, 1, 1);
         mediaTypeList[1] = spMediaType.detach();
+
+        // Output modes are independent of physical device enumeration. The
+        // producer retains its real input size in the version 2 local pipe.
+        const UINT32 modes[][3] = {{1280,720,30},{1280,720,60},{1920,1080,60},{3840,2160,30},{3840,2160,60}};
+        UINT32 index = 2;
+        for (const auto& mode : modes) {
+            for (const GUID& subtype : {MFVideoFormat_NV12, MFVideoFormat_RGB32}) {
+                RETURN_IF_FAILED(MFCreateMediaType(&spMediaType));
+                RETURN_IF_FAILED(spMediaType->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Video));
+                RETURN_IF_FAILED(spMediaType->SetGUID(MF_MT_SUBTYPE, subtype));
+                RETURN_IF_FAILED(spMediaType->SetUINT32(MF_MT_INTERLACE_MODE, MFVideoInterlace_Progressive));
+                RETURN_IF_FAILED(spMediaType->SetUINT32(MF_MT_ALL_SAMPLES_INDEPENDENT, TRUE));
+                RETURN_IF_FAILED(MFSetAttributeSize(spMediaType.get(), MF_MT_FRAME_SIZE, mode[0], mode[1]));
+                RETURN_IF_FAILED(MFSetAttributeRatio(spMediaType.get(), MF_MT_FRAME_RATE, mode[2], 1));
+                RETURN_IF_FAILED(MFSetAttributeRatio(spMediaType.get(), MF_MT_PIXEL_ASPECT_RATIO, 1, 1));
+                mediaTypeList[index++] = spMediaType.detach();
+            }
+        }
 
         RETURN_IF_FAILED(MFCreateAttributes(&m_spAttributes, 10));
         RETURN_IF_FAILED(_SetStreamAttributes(m_spAttributes.get()));
@@ -215,7 +233,14 @@ namespace winrt::WindowsSample::implementation
         RETURN_IF_FAILED(buffer2D->Unlock2D());
 
         RETURN_IF_FAILED(sample->SetSampleTime(MFGetSystemTime()));
-        RETURN_IF_FAILED(sample->SetSampleDuration(333333));
+        wil::com_ptr_nothrow<IMFMediaTypeHandler> currentHandler;
+        wil::com_ptr_nothrow<IMFMediaType> currentType;
+        UINT32 fpsNumerator = 30, fpsDenominator = 1;
+        RETURN_IF_FAILED(m_spStreamDesc->GetMediaTypeHandler(&currentHandler));
+        RETURN_IF_FAILED(currentHandler->GetCurrentMediaType(&currentType));
+        RETURN_IF_FAILED(MFGetAttributeRatio(currentType.get(), MF_MT_FRAME_RATE, &fpsNumerator, &fpsDenominator));
+        RETURN_HR_IF(E_INVALIDARG, fpsNumerator == 0);
+        RETURN_IF_FAILED(sample->SetSampleDuration(10000000LL * fpsDenominator / fpsNumerator));
         if (pToken != nullptr)
         {
             RETURN_IF_FAILED(sample->SetUnknown(MFSampleExtension_Token, pToken));

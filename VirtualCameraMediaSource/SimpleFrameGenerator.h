@@ -39,6 +39,8 @@ private:
     std::mutex m_frameLock;
     std::vector<BYTE> m_latestFrame;
     ULONGLONG m_latestFrameAt = 0;
+    UINT32 m_inputWidth = 1920;
+    UINT32 m_inputHeight = 1080;
     HRESULT _CreateRGB32Frame(
         _Inout_updates_bytes_(len) BYTE* pBuf,
         _In_ DWORD len,

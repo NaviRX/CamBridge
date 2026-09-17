@@ -1,0 +1,50 @@
+name: Windows build and package
+on:
+  push:
+    branches: [main, rust-v2-foundation]
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  windows:
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+      - uses: microsoft/setup-msbuild@v2
+      - uses: NuGet/setup-nuget@v2
+      - name: Rust toolchain
+        run: rustup update stable --no-self-update
+      - name: Rust checks
+        shell: pwsh
+        run: |
+          cargo fmt --check
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          cargo clippy --locked --all-targets -- -D warnings
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          cargo test --locked
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          cargo build --locked --release
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+      - name: Native virtual camera
+        shell: pwsh
+        run: |
+          nuget restore VirtualCameraMediaSource/packages.config -PackagesDirectory packages -NonInteractive
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          msbuild VirtualCameraMediaSource/VirtualCameraMediaSource.vcxproj /m /p:Configuration=Release /p:Platform=x64 /p:WindowsTargetPlatformVersion=10.0 /p:SolutionDir="$pwd\" /p:OutDir="$pwd\native-build\"
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+      - name: Package
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory package
+          Copy-Item target/release/cambridge.exe package/CamBridge.exe
+          Copy-Item native-build/VirtualCameraMediaSource.dll package
+          Copy-Item Assets/CamBridge.ico package
+          Copy-Item Install-CamBridge.ps1,README.md package
+          Copy-Item VirtualCameraMediaSource/LICENSE.microsoft package
+          Compress-Archive package/* CamBridge-Rust-win64.zip
+      - uses: actions/upload-artifact@v4
+        with:
+          name: CamBridge-Rust-win64
+          path: CamBridge-Rust-win64.zip
+          retention-days: 14
