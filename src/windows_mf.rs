@@ -329,7 +329,9 @@ impl CaptureSession {
             else {
                 return Ok(None);
             };
-            let keyframe = keyframe || self.native_jpeg;
+            let keyframe = keyframe
+                || self.native_jpeg
+                || self.native_codec.is_some_and(|c| annexb_keyframe(c, &data));
             let result = if self.native_codec.is_some() {
                 Ok(data.to_vec())
             } else {
@@ -354,6 +356,25 @@ impl CaptureSession {
             result.map(|bytes| Some((bytes, timestamp, keyframe)))
         }
     }
+}
+
+fn annexb_keyframe(codec: crate::capability::TransportCodec, data: &[u8]) -> bool {
+    for (index, bytes) in data.windows(3).enumerate() {
+        if bytes == [0, 0, 1]
+            && let Some(nal) = data.get(index + 3)
+        {
+            match codec {
+                crate::capability::TransportCodec::H264 if nal & 31 == 5 => return true,
+                crate::capability::TransportCodec::Hevc
+                    if (16..=21).contains(&((nal >> 1) & 63)) =>
+                {
+                    return true;
+                }
+                _ => {}
+            }
+        }
+    }
+    false
 }
 
 use windows::Win32::Media::MediaFoundation::{

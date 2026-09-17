@@ -26,6 +26,7 @@ pub struct LiveState {
     pub transferred: u64,
     pub bytes: u64,
     pub receiver: bool,
+    pub local_camera: bool,
 }
 pub type Shared = Arc<Mutex<LiveState>>;
 pub fn status(state: &Shared, text: impl Into<String>) {
@@ -360,7 +361,8 @@ fn sender(settings: SenderSettings, state: Shared, stop: Arc<AtomicBool>) {
                 }
                 continue;
             }
-            let needs_preview = last_preview.elapsed() > Duration::from_millis(66);
+            let needs_preview = state.lock().unwrap().local_camera
+                || last_preview.elapsed() > Duration::from_millis(66);
             let needs_rgb = needs_preview
                 || (active
                     && !(session.native_jpeg

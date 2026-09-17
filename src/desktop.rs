@@ -169,6 +169,7 @@ impl App {
         }
         self.running = None;
         *self.state.lock().unwrap() = Default::default();
+        self.state.lock().unwrap().local_camera = self.camera.is_some();
         if send {
             let Some(device) = self.devices.get(self.selection(DEVICE)) else {
                 runtime::status(&self.state, "캡처 장치를 선택하세요");
@@ -484,11 +485,13 @@ unsafe extern "system" fn procedure(
                 CAMERA => {
                     if app.camera.is_some() {
                         app.camera = None;
+                        app.state.lock().unwrap().local_camera = false;
                         runtime::status(&app.state, "가상 카메라 끔");
                     } else {
                         match VirtualCamera::start(app.state.clone()) {
                             Ok(v) => {
                                 app.camera = Some(v);
+                                app.state.lock().unwrap().local_camera = true;
                                 runtime::status(
                                     &app.state,
                                     "가상 카메라 켬 · OBS에서 CamBridge 선택",
