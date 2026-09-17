@@ -54,6 +54,24 @@ impl Reassembler {
             return Err(ReassemblyError::TooManyChunks);
         }
         self.expire(now);
+        while self
+            .frames
+            .values()
+            .map(|f| f.bytes)
+            .sum::<usize>()
+            .saturating_add(data.len())
+            > MAX_FRAME_BYTES
+        {
+            let Some(oldest) = self
+                .frames
+                .iter()
+                .min_by_key(|(_, f)| f.created)
+                .map(|(id, _)| *id)
+            else {
+                break;
+            };
+            self.frames.remove(&oldest);
+        }
         if !self.frames.contains_key(&frame_id)
             && self.frames.len() >= MAX_INFLIGHT_FRAMES
             && let Some(oldest) = self

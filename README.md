@@ -92,7 +92,7 @@ MSVC 빌드는 LLVM 런타임 DLL이 필요 없습니다. gnullvm 빌드에는 �
 - OBS에서 새 DLL의 4K/60fps 출력 및 장시간 안정성
 - 실제 카메라의 수신자 유무에 따른 CPU 사용률 비교 (인코딩 호출 생략은 테스트됨)
 
-네이티브 DLL의 로컬 C++ 도구가 없어 변경된 DLL은 개발 PC에서 아직 빌드되지 않았습니다.
-GitHub Actions 빌드 결과와 실제 장비 확인을 통과하기 전에는 검증 완료 배포판으로 취급하지 마세요.
+GitHub Actions Windows 빌드에서 Rust 검사·15개 테스트·Release EXE·수정된 네이티브 DLL 빌드와 설치 ZIP 생성을 통과했습니다.
+빌드 및 자동 테스트 통과는 위 실장비 검증을 대신하지 않습니다. 이 배포본은 2.0 시험 버전입니다.
 
 네이티브 가상 카메라는 MIT 라이선스의 Microsoft Windows-Camera 샘플에 기반하며 `VirtualCameraMediaSource/LICENSE.microsoft`를 포함합니다.

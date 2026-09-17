@@ -118,6 +118,9 @@ impl App {
             .and_then(|d| d.modes.get(self.selection(MODE)))
             .and_then(|m| crate::capability::TransportCodec::from_input(m.format))
             .filter(|c| !matches!(c, TransportCodec::Jpeg | TransportCodec::Xrgb8888));
+        if self.selection(SCALE) != 0 || self.selection(FPS) != 0 {
+            self.native_codec = None;
+        }
         self.update_codecs();
     }
     unsafe fn update_codecs(&self) {
@@ -243,6 +246,9 @@ impl App {
     unsafe fn tick(&mut self) {
         if let Some(choices) = self.codec_scan.as_ref().and_then(|r| r.try_recv().ok()) {
             self.codec_scan = None;
+            for id in [DEVICE, MODE, SCALE, FPS, PROBE] {
+                let _ = EnableWindow(self.control(id), true);
+            }
             self.encoders = choices;
             self.update_codecs();
             runtime::status(
@@ -457,13 +463,21 @@ unsafe extern "system" fn procedure(
                     {
                         let (tx, rx) = mpsc::channel();
                         app.codec_scan = Some(rx);
+                        let divisor = [1, 2, 4][app.selection(SCALE).min(2)];
+                        let width = (mode.width / divisor / 2 * 2).max(2);
+                        let height = (mode.height / divisor / 2 * 2).max(2);
+                        let fps_limit = [0, 30, 15][app.selection(FPS).min(2)];
+                        let fps = if fps_limit > 0 && (fps_limit as f64) < mode.fps.as_f64() {
+                            crate::capability::FrameRate::new(fps_limit, 1)
+                        } else {
+                            mode.fps
+                        };
+                        for id in [DEVICE, MODE, SCALE, FPS, PROBE] {
+                            let _ = EnableWindow(app.control(id), false);
+                        }
                         runtime::status(&app.state, "선택한 입력 크기로 CPU/GPU 인코더 시험 중…");
                         std::thread::spawn(move || {
-                            let _ = tx.send(crate::mft::probe_encoders(
-                                mode.width,
-                                mode.height,
-                                mode.fps,
-                            ));
+                            let _ = tx.send(crate::mft::probe_encoders(width, height, fps));
                         });
                     }
                 }
@@ -478,6 +492,10 @@ unsafe extern "system" fn procedure(
                 REFRESH => app.scan(),
                 DEVICE if notification == CBN_SELCHANGE as usize => app.modes(),
                 MODE if notification == CBN_SELCHANGE as usize => {
+                    app.reset_codecs();
+                    app.bandwidth();
+                }
+                SCALE | FPS if notification == CBN_SELCHANGE as usize => {
                     app.reset_codecs();
                     app.bandwidth();
                 }

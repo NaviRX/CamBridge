@@ -348,6 +348,14 @@ impl Transform {
                     buffer
                         .Lock(&mut p, None, Some(&mut len))
                         .map_err(|e| e.to_string())?;
+                    if len == 0 || p.is_null() {
+                        buffer.Unlock().map_err(|e| e.to_string())?;
+                        continue;
+                    }
+                    if len as usize > crate::protocol::MAX_FRAME_BYTES {
+                        let _ = buffer.Unlock();
+                        return Err("코덱 출력 크기 제한 초과".into());
+                    }
                     let mut bytes = std::slice::from_raw_parts(p, len as usize).to_vec();
                     buffer.Unlock().map_err(|e| e.to_string())?;
                     if !self.encode

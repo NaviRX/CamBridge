@@ -36,7 +36,12 @@ impl MfLifetime {
         } else {
             return Err(format!("COM 초기화 실패: {result}"));
         };
-        unsafe { MFStartup(MF_VERSION, MFSTARTUP_FULL) }.map_err(|e| format!("MFStartup: {e}"))?;
+        if let Err(e) = unsafe { MFStartup(MF_VERSION, MFSTARTUP_FULL) } {
+            if com_initialized {
+                unsafe { CoUninitialize() };
+            }
+            return Err(format!("MFStartup: {e}"));
+        }
         Ok(Self { com_initialized })
     }
 }
@@ -193,6 +198,43 @@ pub fn conservative_kind(name: &str, symbolic_link: &str) -> DeviceKind {
     classify_device(name, symbolic_link)
 }
 
+pub fn device_present(link: &str) -> Result<bool, String> {
+    use windows::Win32::Media::MediaFoundation::*;
+    let _lifetime = MfLifetime::start()?;
+    unsafe {
+        let mut attrs = None;
+        MFCreateAttributes(&mut attrs, 1).map_err(|e| e.to_string())?;
+        let attrs = attrs.unwrap();
+        attrs
+            .SetGUID(
+                &MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE,
+                &MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE_VIDCAP_GUID,
+            )
+            .map_err(|e| e.to_string())?;
+        let mut raw = std::ptr::null_mut();
+        let mut count = 0;
+        MFEnumDeviceSources(&attrs, &mut raw, &mut count).map_err(|e| e.to_string())?;
+        let mut found = false;
+        if !raw.is_null() {
+            for i in 0..count as usize {
+                if let Some(a) = std::ptr::read(raw.add(i))
+                    && allocated_string(
+                        &a,
+                        &MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE_VIDCAP_SYMBOLIC_LINK,
+                    )
+                    .ok()
+                    .as_deref()
+                        == Some(link)
+                {
+                    found = true;
+                }
+            }
+            CoTaskMemFree(Some(raw.cast()));
+        }
+        Ok(found)
+    }
+}
+
 /// A reader lives entirely on its capture thread; native MJPEG samples are
 /// retained unchanged for transport. Other modes request MF's RGB converter.
 type CaptureResult = Result<Option<(Vec<u8>, i64, bool)>, String>;
@@ -255,7 +297,22 @@ impl CaptureSession {
             };
             let configure = || -> windows::core::Result<(bool, i32, Option<crate::capability::TransportCodec>,Vec<u8>)> {
                 let stream = MF_SOURCE_READER_FIRST_VIDEO_STREAM.0 as u32;
-                let native = reader.GetNativeMediaType(stream, mode.native_type_index)?;
+                // Driver indices may change after reconnect. Match the complete tuple.
+                let mut selected = None;
+                for index in 0..4096 {
+                    let candidate = match reader.GetNativeMediaType(stream, index) {
+                        Ok(value) => value,
+                        Err(e) if e.code() == MF_E_NO_MORE_TYPES => break,
+                        Err(e) => return Err(e),
+                    };
+                    if candidate.GetUINT64(&MF_MT_FRAME_SIZE).ok() == Some(((mode.width as u64) << 32) | mode.height as u64)
+                        && candidate.GetUINT64(&MF_MT_FRAME_RATE).ok() == Some(((mode.fps.numerator as u64) << 32) | mode.fps.denominator as u64)
+                        && candidate.GetGUID(&MF_MT_SUBTYPE).ok().map(pixel_format) == Some(mode.format) {
+                        selected = Some(candidate);
+                        break;
+                    }
+                }
+                let native = selected.ok_or_else(|| windows::core::Error::from_hresult(windows::Win32::Foundation::E_INVALIDARG))?;
                 let (w, h) = unpack_pair(native.GetUINT64(&MF_MT_FRAME_SIZE)?);
                 let (n, d) = unpack_pair(native.GetUINT64(&MF_MT_FRAME_RATE)?);
                 if (w, h, n, d, pixel_format(native.GetGUID(&MF_MT_SUBTYPE)?))
@@ -416,6 +473,10 @@ impl IMFSourceReaderCallback_Impl for ReaderCallback_Impl {
                 buffer
                     .Lock(&mut p, None, Some(&mut length))
                     .map_err(|e| e.to_string())?;
+                if length == 0 || p.is_null() {
+                    let _ = buffer.Unlock();
+                    return Ok(None);
+                }
                 if length as usize > crate::protocol::MAX_FRAME_BYTES {
                     let _ = buffer.Unlock();
                     return Err("캡처 프레임 크기 제한 초과".into());

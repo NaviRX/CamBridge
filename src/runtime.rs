@@ -244,9 +244,11 @@ fn sender(settings: SenderSettings, state: Shared, stop: Arc<AtomicBool>) {
         status(&state, e.to_string());
         return;
     }
+    socket_buffers(&socket);
     let mut id = 0;
     let mut last_ping = Instant::now() - Duration::from_secs(2);
     let mut seen = None;
+    let mut negotiation_error = None;
     while !stop.load(Ordering::Relaxed) {
         status(&state, "장치 연결 중…");
         let session = match Source::open(&settings) {
@@ -279,9 +281,19 @@ fn sender(settings: SenderSettings, state: Shared, stop: Arc<AtomicBool>) {
                         continue;
                     }
                     match ReceiverHello::decode(&ack[..n]) {
-                        Ok(h) if h.codecs.contains(&settings.codec) => seen = Some(now),
-                        Ok(_) => status(&state, "수신자가 선택한 전송 코덱을 지원하지 않습니다"),
-                        Err(e) => status(&state, format!("프로토콜 오류: {e:?}")),
+                        Ok(h) if h.codecs.contains(&settings.codec) => {
+                            seen = Some(now);
+                            negotiation_error = None;
+                        }
+                        Ok(_) => {
+                            seen = None;
+                            negotiation_error =
+                                Some("수신자가 선택한 전송 코덱을 지원하지 않습니다".to_string());
+                        }
+                        Err(e) => {
+                            seen = None;
+                            negotiation_error = Some(format!("프로토콜 오류: {e:?}"));
+                        }
                     }
                 }
             }
@@ -298,7 +310,12 @@ fn sender(settings: SenderSettings, state: Shared, stop: Arc<AtomicBool>) {
                     continue;
                 }
                 Err(e) => {
-                    status(&state, format!("장치/신호 변경 · 재연결: {e}"));
+                    let reason = if crate::windows_mf::device_present(&settings.link) == Ok(false) {
+                        "장치 분리됨"
+                    } else {
+                        "입력 신호 중단/변경 또는 캡처 오류"
+                    };
+                    status(&state, format!("{reason} · 재연결: {e}"));
                     break;
                 }
             };
@@ -308,6 +325,14 @@ fn sender(settings: SenderSettings, state: Shared, stop: Arc<AtomicBool>) {
                 .native_codec
                 .is_some_and(|c| c != TransportCodec::Jpeg)
             {
+                if !active {
+                    status(
+                        &state,
+                        negotiation_error
+                            .as_deref()
+                            .unwrap_or("수신자 대기 · 압축 입력의 로컬 출력 유지"),
+                    );
+                }
                 if active {
                     id += 1;
                     let mut payload = Vec::with_capacity(data.len() + session.config.len() + 4);
@@ -316,7 +341,12 @@ fn sender(settings: SenderSettings, state: Shared, stop: Arc<AtomicBool>) {
                     payload.extend_from_slice(&data);
                     let header = FrameHeader {
                         codec: settings.codec,
-                        flags: if keyframe { FLAG_KEYFRAME } else { 0 },
+                        flags: (if keyframe { FLAG_KEYFRAME } else { 0 })
+                            | (if session.config.is_empty() {
+                                0
+                            } else {
+                                crate::protocol::FLAG_CONFIG
+                            }),
                         width: session.width,
                         height: session.height,
                         fps_numerator: settings.mode.fps.numerator,
@@ -389,7 +419,12 @@ fn sender(settings: SenderSettings, state: Shared, stop: Arc<AtomicBool>) {
             }
             if !active {
                 encoder = None;
-                status(&state, "수신자 대기 · 로컬 프리뷰 동작 · 송신 인코딩 0");
+                status(
+                    &state,
+                    negotiation_error
+                        .as_deref()
+                        .unwrap_or("수신자 대기 · 두 PC 모두 Rust v2 필요 · 송신 인코딩 0"),
+                );
                 continue;
             }
             if let Some(choice) = &settings.encoder {
@@ -443,7 +478,12 @@ fn sender(settings: SenderSettings, state: Shared, stop: Arc<AtomicBool>) {
                             payload.extend_from_slice(&packet.bytes);
                             let header = FrameHeader {
                                 codec: settings.codec,
-                                flags: if packet.keyframe { FLAG_KEYFRAME } else { 0 },
+                                flags: (if packet.keyframe { FLAG_KEYFRAME } else { 0 })
+                                    | (if packet.config.is_empty() {
+                                        0
+                                    } else {
+                                        crate::protocol::FLAG_CONFIG
+                                    }),
                                 width: output_width,
                                 height: output_height,
                                 fps_numerator: output_fps.numerator,
@@ -559,8 +599,11 @@ fn send_packet(
     header: &FrameHeader,
     payload: &[u8],
 ) -> std::io::Result<()> {
-    for packet in fragments(header, payload)? {
+    for (index, packet) in fragments(header, payload)?.into_iter().enumerate() {
         socket.send_to(&packet, target)?;
+        if index % 64 == 63 {
+            thread::yield_now();
+        }
     }
     Ok(())
 }
@@ -584,6 +627,7 @@ fn receiver(state: Shared, stop: Arc<AtomicBool>) {
     receive_socket(state, stop, socket, true);
 }
 fn receive_socket(state: Shared, stop: Arc<AtomicBool>, socket: UdpSocket, probe: bool) {
+    socket_buffers(&socket);
     let _ = socket.set_read_timeout(Some(Duration::from_millis(100)));
     let mut codecs = vec![TransportCodec::Jpeg, TransportCodec::Xrgb8888];
     for codec in if probe {
@@ -634,6 +678,8 @@ fn receive_socket(state: Shared, stop: Arc<AtomicBool>, socket: UdpSocket, probe
                 ) =>
             {
                 if last_frame.elapsed() > Duration::from_secs(3) {
+                    decoder = None;
+                    waiting_keyframe = true;
                     state.lock().unwrap().receiver = false;
                     status(&state, "영상 없음 · 송신자/입력 신호 대기");
                 }
@@ -778,6 +824,28 @@ fn receive_socket(state: Shared, stop: Arc<AtomicBool>, socket: UdpSocket, probe
         }
     }
     status(&state, "중지됨");
+}
+
+fn socket_buffers(socket: &UdpSocket) {
+    use std::os::windows::io::AsRawSocket;
+    use windows::Win32::Networking::WinSock::{
+        SO_RCVBUF, SO_SNDBUF, SOCKET, SOL_SOCKET, setsockopt,
+    };
+    let bytes = (16 * 1024 * 1024i32).to_ne_bytes();
+    unsafe {
+        let _ = setsockopt(
+            SOCKET(socket.as_raw_socket() as usize),
+            SOL_SOCKET,
+            SO_RCVBUF,
+            Some(&bytes),
+        );
+        let _ = setsockopt(
+            SOCKET(socket.as_raw_socket() as usize),
+            SOL_SOCKET,
+            SO_SNDBUF,
+            Some(&bytes),
+        );
+    }
 }
 
 #[cfg(test)]
